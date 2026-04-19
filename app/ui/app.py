@@ -1,45 +1,179 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+import re
 import sys
 import os
-import streamlit as st
+import inspect
 
-# Add the `app` directory to Python path for local imports.
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
 from services.llm_service import generate_sql
+from services.db_service import execute_query
 
-# Ensure the import path is correct relative to the project structure.
+DB_PATH = "app/db/nutrition.db"
+TABLE_NAME = "uploaded_data"
+
+def normalize_column_name(column_name):
+    # Convert user-facing headers into SQL-safe snake_case names.
+    normalized = re.sub(r"[^0-9a-zA-Z]+", "_", str(column_name).strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized:
+        normalized = "column"
+    if normalized[0].isdigit():
+        normalized = f"col_{normalized}"
+    return normalized
+
+def build_column_mapping(columns):
+    # Ensure every normalized column name is unique for SQLite.
+    used = set()
+    mapping = {}
+    for original in columns:
+        base = normalize_column_name(original)
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        mapping[original] = candidate
+    return mapping
+
+def persist_uploaded_data(df):
+    # Save normalized data to SQLite so LLM can query predictable names.
+    column_mapping = build_column_mapping(df.columns)
+    normalized_df = df.rename(columns=column_mapping)
+    conn = sqlite3.connect(DB_PATH)
+    normalized_df.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
+    conn.close()
+    reverse_mapping = {v: k for k, v in column_mapping.items()}
+    return column_mapping, reverse_mapping
+
+def generate_sql_for_uploaded_table(user_query):
+    # Support both old and new llm_service signatures during hot-reload.
+    params = inspect.signature(generate_sql).parameters
+    if "table_name" in params and "db_path" in params:
+        return generate_sql(
+            user_query,
+            table_name=TABLE_NAME,
+            db_path=DB_PATH,
+        )
+    return generate_sql(user_query)
+
+def validate_generated_sql(sql_query, allowed_table, allowed_columns):
+    # Block unsafe or incorrect SQL before execution.
+    lowered = sql_query.strip().lower()
+    if not lowered.startswith("select"):
+        return "Only SELECT queries are allowed."
+    if f"from {allowed_table.lower()}" not in lowered and f'from "{allowed_table.lower()}"' not in lowered:
+        return f"Generated SQL must query only `{allowed_table}`."
+    if " from nutrition" in lowered or " join nutrition" in lowered:
+        return "Generated SQL referenced `nutrition`, but uploaded dataset uses `uploaded_data`."
+    for blocked in ["drop ", "delete ", "update ", "insert ", "alter ", "truncate "]:
+        if blocked in lowered:
+            return "Only read-only SQL is allowed."
+    if not allowed_columns:
+        return "No columns detected from uploaded file."
+    return None
+
 st.set_page_config(
-    page_title="SQL Analyst",
-    layout = "wide"
+    page_title="LLM SQL Analyst",
+    layout="wide",
 )
 
 st.title("LLM SQL Analyst")
-st.markdown("Ask questions in plain English and get SQL-powered insights.")
+st.caption("Upload a CSV, ask questions in plain English, get SQL-powered answers.")
 st.write("")
 
-#sec 1 : csv upload
-st.subheader("📂 Upload Dataset")
-st.info("CSV upload will be added here.")
-st.write("")
-
-#sec 2: query input
-st.subheader("🤔 Ask Your Question")
-user_query = st.text_input(
-    "Enter your questions : ",
-    placeholder="e.g., Show top 5 high protein foods"
+# ---- Section 1: Upload ----
+st.subheader("1) Upload Dataset")
+uploaded_file = st.file_uploader(
+    "Choose a CSV or Excel file",
+    type=["csv", "xlsx", "xls"],
+    help="Upload a dataset to start analysis.",
 )
-run_button = st.button("Run Query")
-if run_button:
-    if user_query.strip()=="":
-        st.warning('Please enter a query.')
-    else:
-        sql_query = generate_sql(user_query)
-        st.subheader("📃 Generated SQL")
-        st.code(sql_query,language="sql")
+df = None
+
+if uploaded_file is not None:
+    file_name = uploaded_file.name.lower()
+    try:
+        if file_name.endswith(".csv"):
+            # Parse CSV uploads with fallback for malformed rows.
+            try:
+                df = pd.read_csv(uploaded_file)
+            except pd.errors.ParserError:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, engine="python", on_bad_lines="skip")
+                st.warning("Some malformed CSV rows were skipped while reading the file.")
+        elif file_name.endswith(".xlsx") or file_name.endswith(".xls"):
+            # Parse Excel uploads.
+            df = pd.read_excel(uploaded_file)
+        else:
+            st.error("Unsupported file format.")
+            df = None
+
+        if df is not None:
+            st.success(f"Uploaded: {uploaded_file.name}")
+            st.write("Preview (first 5 rows):")
+            st.dataframe(df.head(), use_container_width=True)
+            st.caption(f"Rows: {len(df)} | Columns: {len(df.columns)}")
+            st.session_state["uploaded_df"] = df
+    except Exception as e:
+        st.error(f"Failed to read file: {e}")
+else:
+    st.info("No file uploaded yet.")
+
 st.write("")
 
-#sec 3 : results
-st.subheader("📊 Results ")
-st.info("Query results will appear here.")
+# ---- Section 2: Query ----
+st.subheader("2) Ask a question")
+user_query = st.text_input(
+    "What do you want to know from this data?",
+    placeholder="e.g., Top 5 products by sales",
+)
+run_button = st.button("Run Analysis")
+
+st.write("")
+
+# ---- Section 4: Results ----
+st.subheader("3) Results")
+if run_button:
+    if df is None:
+        st.warning("Please upload a CSV or Excel file first.")
+    elif not user_query.strip():
+        st.warning("Please enter a question before running analysis.")
+    else:
+        try:
+            with st.spinner("Analyzing your data... this can take a few seconds."):
+                column_mapping, reverse_mapping = persist_uploaded_data(df)
+                sql_query = generate_sql_for_uploaded_table(user_query)
+                sql_error = validate_generated_sql(
+                    sql_query,
+                    allowed_table=TABLE_NAME,
+                    allowed_columns=set(column_mapping.values()),
+                )
+                if sql_error:
+                    raise ValueError(sql_error)
+                query_result = execute_query(sql_query, db_path=DB_PATH)
+
+            st.subheader("Generated SQL")
+            st.code(sql_query, language="sql")
+
+            if isinstance(query_result, str):
+                st.error(query_result)
+            else:
+                display_df = query_result.rename(
+                    columns={col: reverse_mapping.get(col, col) for col in query_result.columns}
+                )
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=420,
+                )
+        except Exception as e:
+            st.error(f"Analysis failed: {e}")
+else:
+    st.caption("Upload a file, type a question, then click Run Analysis.")
