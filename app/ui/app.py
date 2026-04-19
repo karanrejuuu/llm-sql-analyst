@@ -51,6 +51,52 @@ def persist_uploaded_data(df):
     reverse_mapping = {v: k for k, v in column_mapping.items()}
     return column_mapping, reverse_mapping
 
+def make_result_header_from_query(user_query):
+    # Build a short, readable header from the user's question.
+    q = user_query.lower().strip()
+    tokens = re.findall(r"[a-zA-Z0-9]+", q)
+    stop_words = {
+        "show", "the", "a", "an", "of", "for", "to", "in", "on", "with",
+        "and", "or", "is", "are", "was", "were", "what", "how", "many",
+        "number", "count", "me", "give", "get", "list", "tell",
+    }
+    meaningful = [token for token in tokens if token not in stop_words]
+
+    if any(word in q for word in ["surviv", "alive"]):
+        return "Survival Count" if "number" in q or "count" in q else "Survival Rate"
+    if any(word in q for word in ["average", "avg", "mean"]):
+        return "Average Value"
+    if any(word in q for word in ["sum", "total"]):
+        return "Total Value"
+    if any(word in q for word in ["max", "highest", "top"]):
+        return "Top Result"
+    if any(word in q for word in ["min", "lowest"]):
+        return "Lowest Result"
+    if any(word in q for word in ["percent", "percentage", "rate"]):
+        return "Percentage"
+
+    if not meaningful:
+        return "Result"
+    return " ".join(token.capitalize() for token in meaningful[:3])
+
+def format_result_headers(df, user_query):
+    # For single-metric outputs, replace noisy SQL aliases with a neat label.
+    if len(df.columns) != 1:
+        return df
+
+    current_header = str(df.columns[0]).strip()
+    looks_noisy = (
+        len(current_header) > 24
+        or "(" in current_header
+        or "_" in current_header
+        or current_header.lower() in {"result", "value"}
+    )
+    if not looks_noisy:
+        return df
+
+    better_header = make_result_header_from_query(user_query)
+    return df.rename(columns={current_header: better_header})
+
 def generate_sql_for_uploaded_table(user_query):
     # Support both old and new llm_service signatures during hot-reload.
     params = inspect.signature(generate_sql).parameters
@@ -65,7 +111,7 @@ def generate_sql_for_uploaded_table(user_query):
 def validate_generated_sql(sql_query, allowed_table, allowed_columns):
     # Block unsafe or incorrect SQL before execution.
     lowered = sql_query.strip().lower()
-    if not lowered.startswith("select"):
+    if not (lowered.startswith("select") or lowered.startswith("with")):
         return "Only SELECT queries are allowed."
     if f"from {allowed_table.lower()}" not in lowered and f'from "{allowed_table.lower()}"' not in lowered:
         return f"Generated SQL must query only `{allowed_table}`."
@@ -167,12 +213,23 @@ if run_button:
                 display_df = query_result.rename(
                     columns={col: reverse_mapping.get(col, col) for col in query_result.columns}
                 )
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    height=420,
-                )
+                display_df = format_result_headers(display_df, user_query)
+                if len(display_df.columns) == 1 and len(display_df) <= 20:
+                    # Compact table keeps single-value answers left-aligned.
+                    st.table(display_df)
+                elif len(display_df) <= 20:
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=420,
+                    )
         except Exception as e:
             st.error(f"Analysis failed: {e}")
 else:

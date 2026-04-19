@@ -1,1 +1,5 @@
-kagglehub
+streamlit
+pandas
+requests
+openpyxl
+xlrd
