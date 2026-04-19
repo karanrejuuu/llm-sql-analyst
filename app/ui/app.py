@@ -125,11 +125,11 @@ def validate_generated_sql(sql_query, allowed_table, allowed_columns):
     return None
 
 st.set_page_config(
-    page_title="LLM SQL Analyst",
+    page_title="Data Query Assistant",
     layout="wide",
 )
 
-st.title("LLM SQL Analyst")
+st.title("Data Query Assistant")
 st.caption("Upload a CSV, ask questions in plain English, get SQL-powered answers.")
 st.write("")
 
