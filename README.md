@@ -1,42 +1,116 @@
 # LLM SQL Analyst
 
-An interactive Streamlit app that lets users upload a CSV/Excel dataset, ask questions in natural language, generate SQL with a local LLM (Ollama), and view query results instantly.
+A lightweight, production-focused Streamlit app that turns natural language questions into SQL for any uploaded CSV/Excel dataset.
 
-## Features
+Users can upload a file, ask a question in plain English, and instantly get:
+- generated SQL,
+- executed results,
+- and cleanly rendered output in the UI.
 
-- Upload CSV (`.csv`) and Excel (`.xlsx`, `.xls`) files
-- Automatically loads uploaded data into SQLite (`uploaded_data` table)
-- Normalizes column names internally for stable SQL generation
-- Preserves original column names in displayed results
-- Converts natural language to SQL using a strict, schema-aware prompt
-- Validates generated SQL for safety (read-only, correct table)
-- Shows generated SQL and result table in the UI
+---
+
+## Why This Project
+
+Most NL-to-SQL demos work only on one fixed schema.  
+This project is built for **dynamic datasets**:
+
+- Upload any tabular file (`.csv`, `.xlsx`, `.xls`)
+- Auto-load it into SQLite
+- Auto-detect schema
+- Generate schema-aware SQL using a local LLM (Ollama + Mistral)
+
+---
+
+## Core Features
+
+- **Dynamic Dataset Upload**
+  - Supports CSV and Excel files.
+- **Schema-Aware SQL Generation**
+  - Prompts the LLM with strict live schema from uploaded data.
+- **Safety Validation Layer**
+  - Enforces read-only SQL and target-table checks.
+- **Output Sanitization**
+  - Cleans model noise (markdown fences, `SQL:` prefixes) before execution.
+- **Column Normalization + Friendly Display**
+  - Internally normalizes column names for SQL stability.
+  - Displays output with readable headers in the UI.
+- **Resilient File Parsing**
+  - Handles malformed CSV rows with fallback parsing.
+
+---
+
+## Tech Stack
+
+- **Frontend:** Streamlit
+- **Backend:** Python
+- **Database:** SQLite
+- **LLM Runtime:** Ollama
+- **Default Model:** Mistral
+
+---
 
 ## Project Structure
 
 ```text
-app/
-├── ui/
-│   └── app.py               # Streamlit UI + upload/query/result flow
-├── services/
-│   ├── llm_service.py       # NL -> SQL generation + repair/sanity checks
-│   └── db_service.py        # SQL execution against SQLite
-└── db/                      # Runtime DB files (gitignored)
+llm-sql-analyst/
+├── app/
+│   ├── ui/
+│   │   └── app.py                 # Streamlit app flow (upload -> ask -> SQL -> results)
+│   ├── services/
+│   │   ├── llm_service.py         # NL->SQL generation, sanitization, repair logic
+│   │   └── db_service.py          # SQLite query execution helper
+│   └── db/
+│       └── .gitkeep               # Keeps db folder in repo (runtime DB is ignored)
+├── requirements.txt
+├── .gitignore
+└── README.md
 ```
 
-## Requirements
+---
 
-- Python 3.10+
-- Ollama running locally
-- A pulled model compatible with your setup (default in code: `mistral`)
+## Setup
 
-Install dependencies:
+### 1) Clone repository
+
+```bash
+git clone <your-repo-url>
+cd llm-sql-analyst
+```
+
+### 2) Create and activate virtual environment
+
+```bash
+python -m venv venv
+```
+
+Windows (PowerShell):
+
+```bash
+venv\Scripts\Activate.ps1
+```
+
+macOS/Linux:
+
+```bash
+source venv/bin/activate
+```
+
+### 3) Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Run the App
+### 4) Start Ollama and pull model
+
+```bash
+ollama pull mistral
+ollama serve
+```
+
+---
+
+## Run
 
 From project root:
 
@@ -44,34 +118,69 @@ From project root:
 streamlit run app/ui/app.py
 ```
 
-## How It Works
+Then in the app:
+1. Upload dataset
+2. Ask question in natural language
+3. Click **Run Analysis**
+4. Review generated SQL + result table
 
-1. User uploads dataset in UI
-2. App reads file into pandas DataFrame
-3. DataFrame is written to SQLite table `uploaded_data`
-4. App fetches table schema and sends strict prompt to LLM
-5. LLM returns SQL
-6. App validates SQL and executes it
-7. Results are displayed in Streamlit
+---
 
-## Notes
+## Request Flow (Architecture)
 
-- SQL generation is constrained to `SELECT`-style analysis.
-- If the model returns noisy output (markdown/prefix text), the app sanitizes it before execution.
-- Runtime DB files are intentionally ignored from git.
+1. File upload is read into a pandas DataFrame
+2. DataFrame is stored as SQLite table `uploaded_data`
+3. Live schema is extracted from SQLite
+4. LLM receives strict system+user prompt with schema constraints
+5. SQL output is sanitized and validated
+6. Query executes through DB service
+7. Results are rendered in Streamlit
+
+---
+
+## Safety and Reliability Choices
+
+- Only analysis-style SQL is allowed (`SELECT`/CTE-style reads)
+- Guardrails block unsafe operations (`DROP`, `DELETE`, `UPDATE`, etc.)
+- Generated SQL must target uploaded table
+- Repair pass attempts to fix invalid first draft SQL
+
+---
+
+## Known Limitations
+
+- Quality depends on selected local model
+- Very messy datasets may still require better normalization rules
+- Complex multi-hop business logic questions can produce imperfect SQL
+
+---
 
 ## Troubleshooting
 
 - **`ModuleNotFoundError: streamlit`**
-  - Install requirements in your active environment.
-- **No response from model**
-  - Ensure Ollama is running and the configured model is available.
-- **Malformed CSV errors**
-  - The app includes fallback CSV parsing and skips bad rows when needed.
+  - Install dependencies in active venv: `pip install -r requirements.txt`
 
-## Future Improvements
+- **No LLM response / timeout**
+  - Ensure Ollama is running and `mistral` is available
+  - Check `OLLAMA_URL` in `app/services/llm_service.py`
+
+- **CSV parsing issues**
+  - App retries malformed CSV with fallback parser and skips broken rows
+
+- **Wrong SQL table references**
+  - App validates table target and rejects invalid SQL before execution
+
+---
+
+## Roadmap
 
 - Query history sidebar
-- Schema preview panel in UI
-- Chart visualization for aggregate outputs
-- Better typed SQL validation (column-level checks)
+- Schema explorer panel in UI
+- Result charting for aggregate queries
+- Stronger column-level SQL validator
+
+---
+
+## License
+
+MIT (or update based on your preferred license).
