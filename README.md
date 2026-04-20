@@ -24,7 +24,7 @@ This project is built for **dynamic datasets**:
 ## Core Features
 
 - **Dynamic Dataset Upload**
-  - Supports CSV and Excel files.
+  - Supports CSV, modern Excel (.xlsx), and legacy Excel (.xls via xlrd).
 - **Schema-Aware SQL Generation**
   - Prompts the LLM with strict live schema from uploaded data.
 - **Safety Validation Layer**
@@ -54,8 +54,7 @@ This project is built for **dynamic datasets**:
 ```text
 llm-sql-analyst/
 ├── app/
-│   ├── ui/
-│   │   └── app.py                 # Streamlit app flow (upload -> ask -> SQL -> results)
+│   ├── app.py                 # Streamlit app flow (upload -> ask -> SQL -> results)
 │   ├── services/
 │   │   ├── llm_service.py         # NL->SQL generation, sanitization, repair logic
 │   │   └── db_service.py          # SQLite query execution helper
@@ -101,7 +100,16 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4) Start Ollama and pull model
+### 4) Setup .env
+
+Create a `.env` file in the root directory to configure the LLM connection:
+
+```
+OLLAMA_URL=http://localhost:11434/api/generate
+OLLAMA_MODEL=mistral
+```
+
+### 5) Start Ollama and pull model
 
 ```bash
 ollama pull mistral
@@ -115,7 +123,7 @@ ollama serve
 From project root:
 
 ```bash
-streamlit run app/ui/app.py
+streamlit run app/app.py
 ```
 
 Then in the app:
@@ -160,7 +168,8 @@ Then in the app:
 - **`ModuleNotFoundError: streamlit`**
   - Install dependencies in active venv: `pip install -r requirements.txt`
 
-  - Ensure Ollama is running and `mistral` is available
+- **No LLM response / timeout**
+  - Ensure Ollama is running and `mistral` (or your chosen model) is available
   - Check `OLLAMA_URL` in `.env` or `app/services/llm_service.py`
 
 - **CSV parsing issues**
