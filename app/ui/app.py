@@ -4,16 +4,13 @@ import sqlite3
 import re
 import sys
 import os
-import inspect
+# Ensure the 'app' directory is in the path so we can import 'services'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if APP_DIR not in sys.path:
-    sys.path.insert(0, APP_DIR)
-
-from services.llm_service import generate_sql
+from services.llm_service import generate_sql, DEFAULT_SYSTEM_PROMPT
 from services.db_service import execute_query
 
-DB_PATH = "app/db/nutrition.db"
+DB_PATH = "app/db/app.db"
 TABLE_NAME = "uploaded_data"
 
 def normalize_column_name(column_name):
@@ -97,16 +94,13 @@ def format_result_headers(df, user_query):
     better_header = make_result_header_from_query(user_query)
     return df.rename(columns={current_header: better_header})
 
-def generate_sql_for_uploaded_table(user_query):
-    # Support both old and new llm_service signatures during hot-reload.
-    params = inspect.signature(generate_sql).parameters
-    if "table_name" in params and "db_path" in params:
-        return generate_sql(
-            user_query,
-            table_name=TABLE_NAME,
-            db_path=DB_PATH,
-        )
-    return generate_sql(user_query)
+def generate_sql_for_uploaded_table(user_query, custom_prompt=None):
+    return generate_sql(
+        user_query,
+        table_name=TABLE_NAME,
+        db_path=DB_PATH,
+        custom_system_prompt=custom_prompt
+    )
 
 def validate_generated_sql(sql_query, allowed_table, allowed_columns):
     # Block unsafe or incorrect SQL before execution.
@@ -115,8 +109,6 @@ def validate_generated_sql(sql_query, allowed_table, allowed_columns):
         return "Only SELECT queries are allowed."
     if f"from {allowed_table.lower()}" not in lowered and f'from "{allowed_table.lower()}"' not in lowered:
         return f"Generated SQL must query only `{allowed_table}`."
-    if " from nutrition" in lowered or " join nutrition" in lowered:
-        return "Generated SQL referenced `nutrition`, but uploaded dataset uses `uploaded_data`."
     for blocked in ["drop ", "delete ", "update ", "insert ", "alter ", "truncate "]:
         if blocked in lowered:
             return "Only read-only SQL is allowed."
@@ -179,6 +171,16 @@ user_query = st.text_input(
     "What do you want to know from this data?",
     placeholder="e.g., Top 5 products by sales",
 )
+
+with st.expander("Settings: Master System Prompt (for AI logic tuning)"):
+    st.info("Modify this prompt to change how the AI reasons about your data and generates SQL.")
+    custom_prompt = st.text_area(
+        "System Prompt Template",
+        value=DEFAULT_SYSTEM_PROMPT.replace("{schema}", "{schema_placeholder}"),
+        height=400,
+        help="Use {schema_placeholder} as a placeholder for the live table schema."
+    )
+
 run_button = st.button("Run Analysis")
 
 st.write("")
@@ -194,7 +196,7 @@ if run_button:
         try:
             with st.spinner("Analyzing your data... this can take a few seconds."):
                 column_mapping, reverse_mapping = persist_uploaded_data(df)
-                sql_query = generate_sql_for_uploaded_table(user_query)
+                sql_query = generate_sql_for_uploaded_table(user_query, custom_prompt=custom_prompt)
                 sql_error = validate_generated_sql(
                     sql_query,
                     allowed_table=TABLE_NAME,

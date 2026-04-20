@@ -14,3 +14,4 @@ app/db/*.sqlite3
 # Editor/workspace files
 .cursor/
 .vscode/
+.env

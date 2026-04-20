@@ -73,7 +73,7 @@ llm-sql-analyst/
 ### 1) Clone repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/YOUR_USERNAME/llm-sql-analyst.git
 cd llm-sql-analyst
 ```
 
@@ -160,9 +160,8 @@ Then in the app:
 - **`ModuleNotFoundError: streamlit`**
   - Install dependencies in active venv: `pip install -r requirements.txt`
 
-- **No LLM response / timeout**
   - Ensure Ollama is running and `mistral` is available
-  - Check `OLLAMA_URL` in `app/services/llm_service.py`
+  - Check `OLLAMA_URL` in `.env` or `app/services/llm_service.py`
 
 - **CSV parsing issues**
   - App retries malformed CSV with fallback parser and skips broken rows

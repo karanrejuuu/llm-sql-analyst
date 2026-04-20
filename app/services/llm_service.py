@@ -1,45 +1,43 @@
 import requests
 import sqlite3
 import re
-OLLAMA_URL = "http://localhost:11434/api/generate"
+import requests
+import sqlite3
+import re
+import os
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
 
-def normalize_nutrition_columns(db_path="app/db/nutrition.db"):
-    rename_map = {
-        "Food_Item": "food_item",
-        "Category": "category",
-        "Calories (kcal)": "calories",
-        "Protein (g)": "protein",
-        "Carbohydrates (g)": "carbs",
-        "Fat (g)": "fat",
-        "Fiber (g)": "fiber",
-        "Sugars (g)": "sugars",
-        "Sodium (mg)": "sodium",
-        "Cholesterol (mg)": "cholesterol",
-        "Meal_Type": "meal_type",
-        "Water_Intake (ml)": "water_intake",
-    }
+DEFAULT_SYSTEM_PROMPT = """
+You are a strict SQLite query generator. Your only job is to output a single valid SQLite SELECT statement.
 
+RULES — follow every one, no exceptions:
+1. Output ONLY the raw SQL. No explanations, no prose, no preamble.
+2. Do NOT wrap the SQL in markdown fences (no ```sql, no ```, no backticks of any kind).
+3. Do NOT prefix with labels like "SQL:", "Query:", "Answer:", "SELECT query:" or anything similar.
+4. The first character of your response must be the letter S (from SELECT).
+5. The last character of your response must be a semicolon (;).
+6. Only use the table name: uploaded_data
+7. Only use column names that exist in the schema provided below.
+8. Never use columns, tables, or aliases not present in the schema.
+9. Use only standard SQLite syntax — no window functions like ROW_NUMBER() unless explicitly supported.
+10. For "top N" questions, use ORDER BY + LIMIT N.
+11. For aggregate questions (average, total, count), use the appropriate aggregate function.
+12. Never output UPDATE, INSERT, DELETE, DROP, or any non-SELECT statement.
+13. If the question cannot be answered with the available columns, output exactly: SELECT 'insufficient schema' AS error;
+
+SCHEMA:
+{schema_placeholder}
+
+Now generate the SQL for the following question. Remember: raw SQL only, starting with SELECT.
+"""
+
+# Configuration defaults
+DEFAULT_DB_PATH = "app/db/app.db"
+
+def get_schema(table_name, db_path=DEFAULT_DB_PATH):
+    # dynamically fetches table schema from sqlite
     conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(nutrition)")
-    current_columns = {row[1] for row in cursor.fetchall()}
-
-    for old_name, new_name in rename_map.items():
-        if old_name in current_columns and new_name not in current_columns:
-            cursor.execute(
-                f'ALTER TABLE nutrition RENAME COLUMN "{old_name}" TO "{new_name}"'
-            )
-            current_columns.remove(old_name)
-            current_columns.add(new_name)
-
-    conn.commit()
-    conn.close()
-
-def get_schema(table_name="nutrition", db_path="app/db/nutrition.db"):
-    #dynamically fetches table schema from sqlite
-    if table_name == "nutrition":
-        normalize_nutrition_columns(db_path=db_path)
-    conn=sqlite3.connect(db_path)
     cursor = conn.cursor()
 
     safe_table_name = table_name.replace('"', '""')
@@ -58,7 +56,7 @@ def get_schema(table_name="nutrition", db_path="app/db/nutrition.db"):
         schema+=f"- {col}\n"
     return schema
 
-def get_table_columns(table_name="nutrition", db_path="app/db/nutrition.db"):
+def get_table_columns(table_name, db_path=DEFAULT_DB_PATH):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     safe_table_name = table_name.replace('"', '""')
@@ -68,42 +66,58 @@ def get_table_columns(table_name="nutrition", db_path="app/db/nutrition.db"):
     return [col[1] for col in columns_info]
 
 def _call_ollama(system_prompt, user_prompt):
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": "mistral",
-            "system": system_prompt,
-            "prompt": user_prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0
-            }
-        }
-    )
-    result = response.json()
-    return result.get("response", "No response from model").strip()
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "system": system_prompt,
+                "prompt": user_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0
+                }
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result.get("response", "No response from model").strip()
+    except Exception as e:
+        return f"Error calling Ollama: {e}"
 
 def _extract_sql(raw_text):
-    # Handle model outputs like "SQL: ...", markdown fences, or extra prose.
-    text = raw_text.strip()
-    text = re.sub(r"^```(?:sql)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-    text = re.sub(r"^\s*sql\s*:\s*", "", text, flags=re.IGNORECASE)
+    # 1) Try to extract from triple-backtick markdown fences.
+    fence_match = re.search(r"```(sql)?\s*(.*?)\s*```", raw_text, re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(2).strip()
+    else:
+        text = raw_text.strip()
 
+    # 2) Strip common prose prefixes that models often include even in "code-only" mode.
+    prefixes_to_strip = [
+        r"^sql\s*:\s*",
+        r"^select\s+query\s*:\s*",
+        r"^here\s+is\s+the\s+sql\s*:\s*",
+        r"^query\s*:\s*"
+    ]
+    for pattern in prefixes_to_strip:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+    # 3) Ensure we start at the first SQL keyword if there's still leading noise.
     lowered = text.lower()
-    select_idx = lowered.find("select")
-    with_idx = lowered.find("with")
+    keywords = ["select", "with"]
+    start_indices = [lowered.find(kw) for kw in keywords if lowered.find(kw) != -1]
 
-    start_idx = -1
-    if select_idx != -1 and with_idx != -1:
-        start_idx = min(select_idx, with_idx)
-    elif select_idx != -1:
-        start_idx = select_idx
-    elif with_idx != -1:
-        start_idx = with_idx
+    if start_indices:
+        start_idx = min(start_indices)
+        if start_idx > 0:
+            text = text[start_idx:]
 
-    if start_idx > 0:
-        text = text[start_idx:]
+    # 4) Keep only the first SQL statement (stop at first semicolon).
+    first_semicolon = text.find(";")
+    if first_semicolon != -1:
+        text = text[: first_semicolon + 1]
 
     return text.strip()
 
@@ -118,43 +132,20 @@ def _basic_sql_sanity(sql_query, table_name):
             return False, "Only read-only SQL is allowed."
     return True, ""
 
-def generate_sql(user_query, table_name="nutrition", db_path="app/db/nutrition.db"):
+
+def generate_sql(user_query, table_name, db_path=DEFAULT_DB_PATH, custom_system_prompt=None):
     schema = get_schema(table_name=table_name, db_path=db_path)
     columns = get_table_columns(table_name=table_name, db_path=db_path)
 
-    system_prompt = f"""
-You are a strict SQLite SQL generator.
+    if custom_system_prompt:
+        system_prompt = custom_system_prompt
+    else:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+    
+    # Fill in the schema placeholder
+    system_prompt = system_prompt.replace("{schema_placeholder}", schema)
 
-Your output is evaluated automatically. You will be penalized for using incorrect column names.
-Treat the schema as STRICT, mandatory constraints (not guidance).
-
-Hard rules:
-1) Use ONLY table `{table_name}`.
-   - NEVER use any other table name (for example: nutrition, data, dataset, table1).
-2) Use ONLY column names that appear in the schema.
-3) Always copy column names exactly as provided.
-4) Do not simplify, shorten, or rename columns.
-   - Invalid: protein_value
-   - Valid: protein
-5) Use snake_case names exactly as defined in schema.
-6) For text comparisons, use case-insensitive matching:
-   - LOWER(column_name) = 'value_in_lowercase'
-7) For percentage/rate calculations, avoid NULL results:
-   - Use NULLIF(denominator, 0) for division safety
-   - Wrap final metric with COALESCE(..., 0)
-8) Return ONLY executable SQLite SQL.
-9) Do not output markdown, comments, or explanations.
-"""
-
-    user_prompt = f"""
-Schema (STRICT):
-{schema}
-
-User question:
-{user_query}
-
-Generate exactly one SQLite SQL query that follows all rules.
-"""
+    user_prompt = f"User question: {user_query}"
     sql_query = _extract_sql(_call_ollama(system_prompt, user_prompt))
     is_valid, reason = _basic_sql_sanity(sql_query, table_name)
     if is_valid:
